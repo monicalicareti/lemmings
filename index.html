@@ -342,7 +342,7 @@
         } else {
           if (lem.fallStartY !== null) {
             const fallDistance = lem.y - lem.fallStartY;
-            if (fallDistance > lem.h * 5) {
+            if (fallDistance > lem.h * 10) {
               // Long falls are fatal.
               gameState.lemmings.splice(i, 1);
               continue;
