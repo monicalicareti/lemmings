@@ -167,6 +167,7 @@
         direction: 1,
         isOnGround: false,
         state: 'walk', // walk | blocker | digger | builder
+        fallStartY: null,
         buildStepsPlaced: 0,
         buildTick: 0,
         digTick: 0
@@ -308,20 +309,13 @@
         // If still walking, apply movement + wall/edge checks.
         if (lem.state === 'walk') {
           const nextX = lem.x + lem.direction;
-          const frontX = lem.direction > 0 ? nextX + lem.w : nextX;
-          const footY = lem.y + lem.h + 1;
 
           // Turn around on canvas boundaries.
           if (nextX <= 0 || nextX + lem.w >= WIDTH) {
             turnAround(lem);
           } else {
-            // Turn around when approaching platform edge (no ground ahead).
-            const hasGroundAhead = isSolidAt(frontX, footY);
-            if (lem.isOnGround && !hasGroundAhead) {
-              turnAround(lem);
-            } else {
-              lem.x = nextX;
-            }
+            // Keep moving so non-blockers fall off platform edges naturally.
+            lem.x = nextX;
           }
 
           // Turn around when touching blockers.
@@ -339,15 +333,30 @@
         const underRight = isSolidAt(lem.x + lem.w - 2, lem.y + lem.h + 1);
         lem.isOnGround = underLeft || underRight;
 
-        if (!lem.isOnGround && lem.state !== 'builder') {
+        if (!lem.isOnGround) {
+          if (lem.fallStartY === null) {
+            lem.fallStartY = lem.y;
+          }
           lem.vy = Math.min(4.2, lem.vy + 0.22);
           lem.y += lem.vy;
-        } else if (lem.state === 'walk') {
-          lem.vy = 0;
+        } else {
+          if (lem.fallStartY !== null) {
+            const fallDistance = lem.y - lem.fallStartY;
+            if (fallDistance > lem.h * 5) {
+              // Long falls are fatal.
+              gameState.lemmings.splice(i, 1);
+              continue;
+            }
+            lem.fallStartY = null;
+          }
 
-          // Snap onto nearest surface to prevent floating jitter.
-          while (isSolidAt(lem.x + lem.w / 2, lem.y + lem.h) && lem.y > HUD_HEIGHT) {
-            lem.y -= 0.5;
+          if (lem.state === 'walk') {
+            lem.vy = 0;
+
+            // Snap onto nearest surface to prevent floating jitter.
+            while (isSolidAt(lem.x + lem.w / 2, lem.y + lem.h) && lem.y > HUD_HEIGHT) {
+              lem.y -= 0.5;
+            }
           }
         }
 
