@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lemmings Mini</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #1b1f2a;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .game-shell {
+      border: 2px solid #4c5773;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+      background: #222a3d;
+    }
+
+    canvas {
+      display: block;
+      width: 800px;
+      height: 600px;
+      cursor: crosshair;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <canvas id="game" width="800" height="600" aria-label="Lemmings game"></canvas>
+  </div>
+
+  <script>
+    // ---- Canvas + Constants -------------------------------------------------
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+    const HUD_HEIGHT = 64;
+
+    const GOAL_SAVED = 7;
+    const MAX_LEMMINGS = 10;
+    const SPAWN_INTERVAL_MS = 2000;
+    const ROUND_TIME_MS = 120000;
+
+    const COLORS = {
+      sky: '#10182b',
+      hud: '#0f1320',
+      hudBorder: '#3d4a68',
+      text: '#eaf0ff',
+      platform: '#2fbd4f',
+      lemming: '#ffcd4a',
+      blocker: '#d85bff',
+      stair: '#68d8ff',
+      entrance: '#79a1ff',
+      exit: '#ff8a5b',
+      tunnel: '#10182b',
+      button: '#2d3751',
+      buttonActive: '#4f79ff',
+      buttonDisabled: '#4b4b4b',
+      gameOver: '#ff5f5f',
+      win: '#70ff95'
+    };
+
+    // ---- Game State ---------------------------------------------------------
+    const ABILITIES = {
+      blocker: { label: 'Blocker', max: 5 },
+      digger: { label: 'Digger', max: 5 },
+      builder: { label: 'Builder', max: 3 }
+    };
+
+    let gameState;
+
+    function createInitialState() {
+      return {
+        selectedAbility: 'blocker',
+        abilityCounts: { blocker: 5, digger: 5, builder: 3 },
+        spawned: 0,
+        saved: 0,
+        lemmings: [],
+        stairs: [],
+        blockers: [],
+        platforms: buildPlatforms(),
+        buttonRects: [],
+        entrance: { x: 28, y: HUD_HEIGHT + 10, w: 20, h: 28 },
+        exit: { x: WIDTH - 54, y: HEIGHT - 126, w: 28, h: 36 },
+        startTime: performance.now(),
+        lastSpawnTime: performance.now(),
+        gameOver: false,
+        win: false,
+        message: ''
+      };
+    }
+
+    function buildPlatforms() {
+      return [
+        { x: 0, y: HEIGHT - 36, w: WIDTH, h: 36, cuts: [] },
+        { x: 110, y: HEIGHT - 126, w: 250, h: 16, cuts: [] },
+        { x: 420, y: HEIGHT - 204, w: 240, h: 16, cuts: [] },
+        { x: 190, y: HEIGHT - 284, w: 180, h: 16, cuts: [] },
+        { x: 22, y: HEIGHT - 362, w: 160, h: 16, cuts: [] }
+      ];
+    }
+
+    function restartGame() {
+      gameState = createInitialState();
+    }
+
+    // ---- Helpers ------------------------------------------------------------
+    function rectsOverlap(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function isWithinCuts(platform, xCenter) {
+      return platform.cuts.some(cut => xCenter >= cut.x && xCenter <= cut.x + cut.w);
+    }
+
+    function isSolidAt(x, y) {
+      if (y < HUD_HEIGHT || y > HEIGHT) return false;
+
+      // Builder stairs count as solid terrain.
+      for (const stair of gameState.stairs) {
+        if (x >= stair.x && x <= stair.x + stair.w && y >= stair.y && y <= stair.y + stair.h) {
+          return true;
+        }
+      }
+
+      for (const platform of gameState.platforms) {
+        if (x >= platform.x && x <= platform.x + platform.w && y >= platform.y && y <= platform.y + platform.h) {
+          if (!isWithinCuts(platform, x)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function findPlatformAt(x, y) {
+      for (const platform of gameState.platforms) {
+        if (x >= platform.x && x <= platform.x + platform.w && y >= platform.y && y <= platform.y + platform.h) {
+          if (!isWithinCuts(platform, x)) {
+            return platform;
+          }
+        }
+      }
+      return null;
+    }
+
+    function createLemming() {
+      const spawnX = gameState.entrance.x + 5;
+      const spawnY = gameState.entrance.y + gameState.entrance.h + 2;
+      return {
+        x: spawnX,
+        y: spawnY,
+        w: 10,
+        h: 14,
+        vx: 1,
+        vy: 0,
+        direction: 1,
+        isOnGround: false,
+        state: 'walk', // walk | blocker | digger | builder
+        fallStartY: null,
+        buildStepsPlaced: 0,
+        buildTick: 0,
+        digTick: 0
+      };
+    }
+
+    function turnAround(lemming) {
+      lemming.direction *= -1;
+      lemming.vx = Math.abs(lemming.vx) * lemming.direction;
+    }
+
+    function assignAbility(target) {
+      if (gameState.gameOver || gameState.win) return;
+
+      const ability = gameState.selectedAbility;
+      if (gameState.abilityCounts[ability] <= 0) return;
+      if (target.state !== 'walk') return;
+
+      gameState.abilityCounts[ability] -= 1;
+
+      if (ability === 'blocker') {
+        target.state = 'blocker';
+        target.vx = 0;
+        target.vy = 0;
+        target.direction = 0;
+        gameState.blockers.push({ x: target.x - 2, y: target.y, w: target.w + 4, h: target.h });
+      } else if (ability === 'digger') {
+        target.state = 'digger';
+        target.vx = 0;
+        target.vy = 0.6;
+        target.digTick = 0;
+      } else if (ability === 'builder') {
+        target.state = 'builder';
+        target.vx = 0;
+        target.vy = 0;
+        target.buildTick = 0;
+        target.buildStepsPlaced = 0;
+      }
+    }
+
+    function carveTunnel(lemming) {
+      const digWidth = 8;
+      const centerX = lemming.x + lemming.w / 2;
+      const hit = findPlatformAt(centerX, lemming.y + lemming.h - 1);
+      if (!hit) {
+        lemming.state = 'walk';
+        lemming.vx = lemming.direction === 0 ? 1 : lemming.direction;
+        return;
+      }
+
+      hit.cuts.push({ x: centerX - digWidth / 2, y: hit.y, w: digWidth, h: hit.h });
+      lemming.y += 1;
+
+      if (lemming.y + lemming.h >= HEIGHT - 1) {
+        lemming.state = 'walk';
+        lemming.vx = lemming.direction === 0 ? 1 : lemming.direction;
+      }
+    }
+
+    function buildStep(lemming) {
+      if (lemming.buildStepsPlaced >= 12) {
+        lemming.state = 'walk';
+        lemming.vx = lemming.direction;
+        return;
+      }
+
+      const stepW = 10;
+      const stepH = 6;
+      const dx = lemming.direction * stepW;
+      const stepX = lemming.x + (lemming.direction > 0 ? lemming.w : -stepW);
+      const stepY = lemming.y + lemming.h - stepH - 1;
+
+      if (stepY < HUD_HEIGHT + 4) {
+        lemming.state = 'walk';
+        lemming.vx = lemming.direction;
+        return;
+      }
+
+      const ceilingProbeY = stepY - 2;
+      if (isSolidAt(stepX + stepW / 2, ceilingProbeY)) {
+        lemming.state = 'walk';
+        lemming.vx = lemming.direction;
+        return;
+      }
+
+      gameState.stairs.push({ x: stepX, y: stepY, w: stepW, h: stepH });
+      lemming.x += dx;
+      lemming.y -= stepH;
+      lemming.buildStepsPlaced += 1;
+    }
+
+    // ---- Update Loop --------------------------------------------------------
+    function update(timestamp) {
+      if (!gameState) restartGame();
+
+      const elapsed = timestamp - gameState.startTime;
+      const remainingMs = Math.max(0, ROUND_TIME_MS - elapsed);
+
+      // Spawn one lemming every 2 seconds until max reached.
+      if (!gameState.gameOver && !gameState.win && gameState.spawned < MAX_LEMMINGS) {
+        if (timestamp - gameState.lastSpawnTime >= SPAWN_INTERVAL_MS) {
+          gameState.lemmings.push(createLemming());
+          gameState.spawned += 1;
+          gameState.lastSpawnTime = timestamp;
+        }
+      }
+
+      for (let i = gameState.lemmings.length - 1; i >= 0; i--) {
+        const lem = gameState.lemmings[i];
+
+        // Saved condition.
+        if (rectsOverlap(lem, gameState.exit)) {
+          gameState.saved += 1;
+          gameState.lemmings.splice(i, 1);
+          continue;
+        }
+
+        // Blockers do not move and act like walls.
+        if (lem.state === 'blocker') {
+          continue;
+        }
+
+        // Digger logic: carve vertical path downward.
+        if (lem.state === 'digger') {
+          lem.digTick += 1;
+          if (lem.digTick % 4 === 0) {
+            carveTunnel(lem);
+          }
+        }
+
+        // Builder logic: place one step every few frames.
+        if (lem.state === 'builder') {
+          lem.buildTick += 1;
+          if (lem.buildTick % 10 === 0) {
+            buildStep(lem);
+          }
+        }
+
+        // If still walking, apply movement + wall/edge checks.
+        if (lem.state === 'walk') {
+          const nextX = lem.x + lem.direction;
+
+          // Turn around on canvas boundaries.
+          if (nextX <= 0 || nextX + lem.w >= WIDTH) {
+            turnAround(lem);
+          } else {
+            // Keep moving so non-blockers fall off platform edges naturally.
+            lem.x = nextX;
+          }
+
+          // Turn around when touching blockers.
+          for (const blocker of gameState.blockers) {
+            if (rectsOverlap(lem, blocker)) {
+              turnAround(lem);
+              lem.x += lem.direction * 2;
+              break;
+            }
+          }
+        }
+
+        // Gravity and landing for non-blockers; builders/diggers still affected when unsupported.
+        const underLeft = isSolidAt(lem.x + 2, lem.y + lem.h + 1);
+        const underRight = isSolidAt(lem.x + lem.w - 2, lem.y + lem.h + 1);
+        lem.isOnGround = underLeft || underRight;
+
+        if (!lem.isOnGround) {
+          if (lem.fallStartY === null) {
+            lem.fallStartY = lem.y;
+          }
+          lem.vy = Math.min(4.2, lem.vy + 0.22);
+          lem.y += lem.vy;
+        } else {
+          if (lem.fallStartY !== null) {
+            const fallDistance = lem.y - lem.fallStartY;
+            if (fallDistance > lem.h * 10) {
+              // Long falls are fatal.
+              gameState.lemmings.splice(i, 1);
+              continue;
+            }
+            lem.fallStartY = null;
+          }
+
+          if (lem.state === 'walk') {
+            lem.vy = 0;
+
+            // Snap onto nearest surface to prevent floating jitter.
+            while (isSolidAt(lem.x + lem.w / 2, lem.y + lem.h) && lem.y > HUD_HEIGHT) {
+              lem.y -= 0.5;
+            }
+          }
+        }
+
+        // Keep inside play area.
+        lem.y = Math.min(HEIGHT - lem.h, lem.y);
+      }
+
+      // Win/Lose checks.
+      if (gameState.saved >= GOAL_SAVED) {
+        gameState.win = true;
+        gameState.message = 'You Win!';
+      } else if (remainingMs <= 0) {
+        gameState.gameOver = true;
+        gameState.message = 'Game Over';
+      } else if (
+        gameState.spawned === MAX_LEMMINGS &&
+        gameState.lemmings.length === 0 &&
+        gameState.saved < GOAL_SAVED
+      ) {
+        gameState.gameOver = true;
+        gameState.message = 'Game Over';
+      }
+
+      render(remainingMs);
+      requestAnimationFrame(update);
+    }
+
+    // ---- Rendering ----------------------------------------------------------
+    function drawPlatforms() {
+      for (const platform of gameState.platforms) {
+        ctx.fillStyle = COLORS.platform;
+        ctx.fillRect(platform.x, platform.y, platform.w, platform.h);
+
+        // Draw dug tunnels by painting cut-outs using background color.
+        ctx.fillStyle = COLORS.tunnel;
+        for (const cut of platform.cuts) {
+          ctx.fillRect(cut.x, platform.y, cut.w, platform.h);
+        }
+      }
+
+      ctx.fillStyle = COLORS.stair;
+      for (const stair of gameState.stairs) {
+        ctx.fillRect(stair.x, stair.y, stair.w, stair.h);
+      }
+    }
+
+    function drawLemmings() {
+      for (const lem of gameState.lemmings) {
+        ctx.fillStyle = lem.state === 'blocker' ? COLORS.blocker : COLORS.lemming;
+        ctx.fillRect(lem.x, lem.y, lem.w, lem.h);
+      }
+    }
+
+    function drawHud(remainingMs) {
+      ctx.fillStyle = COLORS.hud;
+      ctx.fillRect(0, 0, WIDTH, HUD_HEIGHT);
+      ctx.strokeStyle = COLORS.hudBorder;
+      ctx.strokeRect(0, 0, WIDTH, HUD_HEIGHT);
+
+      ctx.fillStyle = COLORS.text;
+      ctx.font = 'bold 18px Arial';
+      ctx.fillText(`Saved: ${gameState.saved}/${MAX_LEMMINGS}`, 16, 26);
+
+      const totalSeconds = Math.ceil(remainingMs / 1000);
+      const mm = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+      const ss = String(totalSeconds % 60).padStart(2, '0');
+      ctx.fillText(`Time: ${mm}:${ss}`, 16, 50);
+
+      // Buttons drawn in canvas for click detection.
+      const buttons = [
+        { id: 'blocker', text: `Blocker (${gameState.abilityCounts.blocker})`, x: 220 },
+        { id: 'digger', text: `Digger (${gameState.abilityCounts.digger})`, x: 370 },
+        { id: 'builder', text: `Builder (${gameState.abilityCounts.builder})`, x: 510 },
+        { id: 'restart', text: 'Restart', x: 668 }
+      ];
+
+      gameState.buttonRects = [];
+      for (const btn of buttons) {
+        const w = btn.id === 'restart' ? 110 : 135;
+        const h = 34;
+        const y = 14;
+        const isActive = gameState.selectedAbility === btn.id;
+        const isDisabled = btn.id !== 'restart' && gameState.abilityCounts[btn.id] <= 0;
+
+        ctx.fillStyle = isDisabled
+          ? COLORS.buttonDisabled
+          : isActive
+            ? COLORS.buttonActive
+            : COLORS.button;
+        ctx.fillRect(btn.x, y, w, h);
+        ctx.strokeStyle = COLORS.hudBorder;
+        ctx.strokeRect(btn.x, y, w, h);
+        ctx.fillStyle = COLORS.text;
+        ctx.font = '14px Arial';
+        ctx.fillText(btn.text, btn.x + 8, y + 22);
+
+        gameState.buttonRects.push({ id: btn.id, x: btn.x, y, w, h });
+      }
+    }
+
+    function render(remainingMs) {
+      ctx.fillStyle = COLORS.sky;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      drawPlatforms();
+
+      // Entrance + exit doors.
+      ctx.fillStyle = COLORS.entrance;
+      ctx.fillRect(gameState.entrance.x, gameState.entrance.y, gameState.entrance.w, gameState.entrance.h);
+      ctx.fillStyle = COLORS.exit;
+      ctx.fillRect(gameState.exit.x, gameState.exit.y, gameState.exit.w, gameState.exit.h);
+
+      drawLemmings();
+      drawHud(remainingMs);
+
+      if (gameState.win || gameState.gameOver) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = gameState.win ? COLORS.win : COLORS.gameOver;
+        ctx.font = 'bold 56px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(gameState.message, WIDTH / 2, HEIGHT / 2);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    // ---- Input --------------------------------------------------------------
+    canvas.addEventListener('click', (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) * WIDTH) / rect.width;
+      const y = ((event.clientY - rect.top) * HEIGHT) / rect.height;
+
+      // HUD button clicks.
+      for (const btn of gameState.buttonRects) {
+        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+          if (btn.id === 'restart') {
+            restartGame();
+            return;
+          }
+          if (gameState.abilityCounts[btn.id] > 0) {
+            gameState.selectedAbility = btn.id;
+          }
+          return;
+        }
+      }
+
+      if (y <= HUD_HEIGHT || gameState.gameOver || gameState.win) return;
+
+      // Lemming click detection.
+      for (let i = gameState.lemmings.length - 1; i >= 0; i--) {
+        const lem = gameState.lemmings[i];
+        if (x >= lem.x && x <= lem.x + lem.w && y >= lem.y && y <= lem.y + lem.h) {
+          assignAbility(lem);
+          break;
+        }
+      }
+    });
+
+    restartGame();
+    requestAnimationFrame(update);
+  </script>
+</body>
+</html>
